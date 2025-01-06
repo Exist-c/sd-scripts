@@ -42,4 +42,6 @@ rich==13.7.0
 # for T5XXL tokenizer (SD3/FLUX)
 sentencepiece==0.2.0
 # for kohya_ss library
+prodigy-plus-schedule-free
+# for prodigy_plus_schedule_free optimizer
 -e .
