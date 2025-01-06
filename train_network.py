@@ -757,6 +757,65 @@ class NetworkTrainer:
         # resumeする
         train_util.resume_from_local_or_hf_if_specified(accelerator, args)
 
+        if args.fused_backward_pass:
+            if args.optimizer_type.lower() == "adafactor":
+                print(f"use fused optimizer {args.optimizer_type} for backward pass")
+                import library.adafactor_fused
+                library.adafactor_fused.patch_adafactor_fused(optimizer)
+
+                for param_group in optimizer.param_groups:
+                    for parameter in param_group["params"]:
+                        if parameter.requires_grad:
+                            def __grad_hook(tensor: torch.Tensor, param_group=param_group):
+                                if accelerator.sync_gradients and args.max_grad_norm != 0.0:
+                                    accelerator.clip_grad_norm_(tensor, args.max_grad_norm)
+                                optimizer.step(tensor, group=param_group)
+                                tensor.grad = None
+                            parameter.register_post_accumulate_grad_hook(__grad_hook)
+
+            elif args.optimizer_type.lower() == "ProdigyPlusScheduleFree".lower() :
+                print(f"use fused optimizer {args.optimizer_type} for backward pass")
+                #patch the optimizer
+                def patch_on_end_step(optimizer,group):
+                    group_index = optimizer.optimizer.param_groups.index(group)
+ 
+                    # When training both unet and  text_encoder, 
+                    # text_encoder parameters of the next step will pass to optimizer.
+                    # I can't locate the issue, I don't know if this will affect the performance.
+                    # force optimizer to process all parameters within a single step,
+                    if group_index not in optimizer.optimizer.groups_to_process:
+                        return False
+            
+                    # Decrement params processed so far.
+                    optimizer.optimizer.groups_to_process[group_index] -= 1
+
+                    # End of param loop for group, update calculations.
+                    if optimizer.optimizer.groups_to_process[group_index] == 0:
+                        k = group['k']
+                        prodigy_steps = group['prodigy_steps']
+                        if prodigy_steps > 0 and k == prodigy_steps:
+                            print(f"[{optimizer.optimizer.__class__.__name__}] Prodigy stepsize adaptation disabled after {k} steps for param_group {group_index}.")
+
+                        optimizer.optimizer.groups_to_process.pop(group_index)
+                        if optimizer.optimizer.split_groups: # When groups are split, calculate per-group d.
+                            optimizer.optimizer.update_d_and_reset(group)
+
+                        group['k'] = k + 1
+                        return True
+
+                    return False
+                optimizer.optimizer.on_end_step = patch_on_end_step.__get__(optimizer)
+                
+                for param_group in  optimizer.optimizer.param_groups:
+                    for parameter in param_group["params"]:
+                        if parameter.requires_grad:
+                            def __grad_hook(tensor: torch.Tensor, param_group=param_group):
+                                if accelerator.sync_gradients and args.max_grad_norm != 0.0:
+                                    accelerator.clip_grad_norm_(tensor, args.max_grad_norm)
+                                optimizer.optimizer.step_param(tensor, param_group)
+                                tensor.grad = None  # clear grad to save memory
+                            parameter.register_post_accumulate_grad_hook(__grad_hook)
+
         # epoch数を計算する
         num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
         num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch)
@@ -1254,10 +1313,12 @@ class NetworkTrainer:
                         if args.max_grad_norm != 0.0:
                             params_to_clip = accelerator.unwrap_model(network).get_trainable_params()
                             accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
-
-                    optimizer.step()
-                    lr_scheduler.step()
-                    optimizer.zero_grad(set_to_none=True)
+                    if not args.fused_backward_pass:
+                        optimizer.step()
+                        lr_scheduler.step()
+                        optimizer.zero_grad(set_to_none=True)
+                    else:
+                        lr_scheduler.step()
 
                 if args.scale_weight_norms:
                     keys_scaled, mean_norm, maximum_norm = accelerator.unwrap_model(network).apply_max_norm_regularization(
