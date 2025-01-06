@@ -4897,6 +4897,13 @@ def get_optimizer(args, trainable_params) -> tuple[str, str, object]:
         elif optimizer_type == "SGDScheduleFree".lower():
             optimizer_class = sf.SGDScheduleFree
             logger.info(f"use SGDScheduleFree optimizer | {optimizer_kwargs}")
+        elif optimizer_type == "ProdigyPlusScheduleFree".lower():
+            try:
+                from prodigyplus.prodigy_plus_schedulefree import ProdigyPlusScheduleFree
+            except ImportError:
+                raise ImportError("No prodigy_plus_schedulefree / prodigy_plus_schedulefreeがインストールされていないようです")
+            optimizer_class = ProdigyPlusScheduleFree
+            logger.info(f"use ProdigyPlusScheduleFree optimizer | {optimizer_kwargs}")
         else:
             optimizer_class = None
 
